@@ -1455,3 +1455,77 @@ fn a_first_lane_read_after_a_loop_the_lanes_left_at_different_turns() {
     assert_eq!(out[0][..64], [1u32; 64], "every thread stores lane 0's v8");
     eprintln!("ran on the hardware device: both host waves read lane 0's value after the loop");
 }
+
+/// One console wave: v1 holds each lane's number in its high half, then a 16-bit add of two
+/// scalars (1.0 + 2.0) writes its low half and keeps the high one; every thread stores the first
+/// lane's v1, lane 0's: 0x4200. (A read of lane 63 makes the two host waves exchange.) v1 is
+/// not alike in the console wave, its high halves differ: the upper host wave stored its own
+/// lane 32's, 0x0020_4200, while `lane_uniform` took a 16-bit result for a whole write.
+#[test]
+fn a_first_lane_read_of_a_register_a_16_bit_result_wrote_in_part() {
+    use windows::Win32::Graphics::Direct3D12::{
+        D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1,
+    };
+
+    let native = native(&[
+        0x3402_0090, // v_lshlrev_b32 v1, 16, v0         (the lane's number in the high half)
+        0xD760_0013,
+        0x0201_7F00, // v_readlane_b32 s19, v0, 63
+        0x7E04_0201, // v_mov_b32 v2, s1
+        0x6402_0400, // v_add_f16 v1, s0, v2              (the low half; the high half stays)
+        0x7E20_0501, // v_readfirstlane_b32 s16, v1
+        0x7E06_0210, // v_mov_b32 v3, s16
+        0x3404_0082, // v_lshlrev_b32 v2, 2, v0
+        0xE070_1000,
+        0x8002_0302, // buffer_store_dword v3, v2, s[8:11], 0 offen
+    ]);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let mut waves = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    // SAFETY: the output has the layout and size required by OPTIONS1.
+    unsafe {
+        host.device.CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS1,
+            (&raw mut waves).cast(),
+            size_of_val(&waves) as u32,
+        )
+    }
+    .expect("query wave capabilities");
+    if !(waves.WaveLaneCountMin..=waves.WaveLaneCountMax).contains(&32) {
+        eprintln!("the device does not support wave32; hardware dispatch skipped");
+        return;
+    }
+    let (root, pso) = host.compute_pipeline(&shader).expect("wave32 pipeline");
+    // s0 = 1.0 and s1 = 2.0 as 16-bit floats
+    let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+    for u in &shader.user_data {
+        if let (RootType::Constants, 0, d @ 0..=1) = (u.root, u.slot, u.dword) {
+            ud[u.index as usize] = [0x3C00, 0x4000][d as usize];
+        }
+    }
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(ud))],
+                views: &[View::RawUav(64)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    assert_eq!(out[0][..64], [0x4200u32; 64], "every thread stores lane 0's v1");
+    eprintln!("ran on the hardware device: both host waves read lane 0's whole register");
+}
