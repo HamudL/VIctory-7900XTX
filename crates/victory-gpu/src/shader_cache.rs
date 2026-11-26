@@ -154,14 +154,18 @@ pub(crate) fn translation() -> [u8; 32] {
 /// can do decides the form of some programs.
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
     let _ = crate::host::host();
-    let misses = MISSES.load(Ordering::Relaxed);
     let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
-    match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate, true)?,
-        None => translate(container)?,
+    // Whether this call translated, not the global miss count around it: on
+    // several threads (`translate --warm`, `victory shaders`) another
+    // thread's miss made a hit count as translated now (#32).
+    let ran = match CACHE.get() {
+        Some(cache) => cached_ran(cache, &build(), SOURCE, container, translate, true)?.1,
+        None => {
+            translate(container)?;
+            true
+        }
     };
-    // (Counts other threads' misses too: the caller only adds them up.)
-    Ok(MISSES.load(Ordering::Relaxed) == misses)
+    Ok(!ran)
 }
 
 /// The translation of a console shader container, from the cache when
@@ -219,6 +223,19 @@ fn cached_by(
     translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
     refresh: bool,
 ) -> Result<HostShader, String> {
+    cached_ran(cache, build, source, container, translate, refresh).map(|(shader, _)| shader)
+}
+
+/// [`cached_by`], and whether this call translated (a miss, an entry of an
+/// earlier build made again with `refresh`, or one that did not read back).
+fn cached_ran(
+    cache: &Cache,
+    build: &[u8; 32],
+    source: &str,
+    container: &[u8],
+    translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
+    refresh: bool,
+) -> Result<(HostShader, bool), String> {
     let input = [&build[..], container].concat();
     let converter = Translate {
         translate,
@@ -260,13 +277,13 @@ fn cached_by(
             };
             counter.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(path = %path.display(), "shader {what}");
-            return Ok(shader);
+            return Ok((shader, ran));
         }
         tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
         let _ = std::fs::remove_file(&path);
     }
     MISSES.fetch_add(1, Ordering::Relaxed);
-    (converter.translate)(container)
+    (converter.translate)(container).map(|shader| (shader, true))
 }
 
 const MAGIC: &[u8; 4] = b"VSH2";
@@ -514,6 +531,26 @@ mod tests {
         // Failures are not stored.
         let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
         assert!(cached(&cache, &build, b"other", fail, false).is_err());
+    }
+
+    #[test]
+    fn each_call_tells_whether_it_translated() {
+        // (`precompile` counted another thread's miss as its own, #32)
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path()).unwrap();
+        let build = [9u8; 32];
+        let translate = |_: &[u8]| Ok(shader());
+        let ran = |container: &[u8], refresh: bool, source: &str| {
+            cached_ran(&cache, &build, source, container, translate, refresh).map(|(_, ran)| ran)
+        };
+        assert_eq!(ran(b"first", false, "build a"), Ok(true));
+        assert_eq!(ran(b"second", false, "build a"), Ok(true));
+        // the other one's miss between two calls for the first leaves it a hit
+        assert_eq!(ran(b"first", false, "build a"), Ok(false));
+        // an entry of an earlier build: served as it is, or made again to refresh it
+        assert_eq!(ran(b"first", false, "build b"), Ok(false));
+        assert_eq!(ran(b"first", true, "build b"), Ok(true));
+        assert_eq!(ran(b"first", true, "build b"), Ok(false));
     }
 
     fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
