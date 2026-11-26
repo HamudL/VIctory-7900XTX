@@ -108,6 +108,8 @@ mod size_tests;
 mod valu_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
+#[cfg(test)]
+mod wave64_programs;
 #[cfg(all(test, windows))]
 mod wave64_tests;
 mod wave;

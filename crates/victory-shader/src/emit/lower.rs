@@ -1589,7 +1589,7 @@ thread_local! {
     pub(super) static THREAD_MAX_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 pub(super) use THREAD_MAX_WAVE as TEST_HOST_WAVE;
 
 /// Override the detected wave width for the current translation worker.
@@ -9422,14 +9422,16 @@ impl<'a> Lower<'a> {
                 let halves = self.exchange.as_ref().is_some_and(|e| !e.1) && !self.local;
                 let r = if halves && !alike {
                     if !self.all_lanes(self.cur_ir) {
-                        // shortcut: `VICTORY_FIRSTLANE_OWN=1` takes the host wave's own
-                        // first lane, exact when the value is the same in every lane of
-                        // the console wave (the ray-tracing builder's scans read a sum of
-                        // scalars this way, inside a loop whose exit is per console wave).
-                        static OWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                        if *OWN.get_or_init(|| std::env::var_os("VICTORY_FIRSTLANE_OWN").is_some_and(|v| v == "1")) {
-                            return int(self, mine);
-                        }
+                        // The halves cannot meet here (a group barrier where not every lane
+                        // runs), and the host wave's own first lane is the console's only
+                        // for a value alike in the console wave, which `uniform` did not
+                        // show: refused, with the block named for the forms that take the
+                        // branches around it wave-wide (`widen`). The ray-tracing builder's
+                        // prefix scans, a sum of scalars read inside a loop whose exit is
+                        // per console wave, are shown alike (`lane_uniform`), so they no
+                        // longer need `VICTORY_FIRSTLANE_OWN=1`, which took the own first
+                        // lane of any value here, the wrong lane's where it was not alike.
+                        // It is not read any more (#101).
                         need(self.cur_ir);
                         return Err("a first-lane read where not every lane runs");
                     }

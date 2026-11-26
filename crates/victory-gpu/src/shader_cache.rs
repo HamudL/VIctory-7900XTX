@@ -26,6 +26,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// The encoding of entries ([`encode`]), part of the key.
 const FORMAT: u32 = 2;
 
+/// A switch the translator no longer reads (#101). It stays in the key as
+/// if unset: a run without it keeps the key it had, so nothing is
+/// translated again, and a run that still sets it is served what the
+/// translator makes now, not what the switch once made.
+const RETIRED_FIRSTLANE_OWN: &str = "VICTORY_FIRSTLANE_OWN";
+
 use victory_pipeline::{Cache, Converter};
 use victory_shader::emit::{HostShader, StaticSampler, UserData};
 use victory_shader::resource::RootIndexedView;
@@ -117,7 +123,7 @@ fn build() -> [u8; 32] {
             "VICTORY_LDS_FLAGS",
             "VICTORY_F16_NEAREST",
             "VICTORY_HELPER_OWN",
-            "VICTORY_FIRSTLANE_OWN",
+            RETIRED_FIRSTLANE_OWN,
             "VICTORY_FIRST_HALF",
             "VICTORY_STRICT_JOINS",
             "VICTORY_MESH_OUTPUT_STRICT",
@@ -126,7 +132,7 @@ fn build() -> [u8; 32] {
         ] {
             bytes.extend_from_slice(name.as_bytes());
             bytes.push(b'=');
-            if let Some(value) = std::env::var_os(name) {
+            if let Some(value) = std::env::var_os(name).filter(|_| name != RETIRED_FIRSTLANE_OWN) {
                 bytes.extend_from_slice(value.as_encoded_bytes());
             }
             bytes.push(0);
